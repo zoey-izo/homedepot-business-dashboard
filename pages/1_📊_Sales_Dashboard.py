@@ -740,6 +740,30 @@ with tabs[2]:
             d_dod = pct_change(today_units, yesterday_units)
 
             st.subheader(f"{selected_sku} · SKU诊断")
+
+            # Current selected date-range KPIs:
+            # Always show what the user explicitly selected before rolling 7D/30D metrics.
+            period_units = detail_period["Quantity"].sum()
+            period_revenue = detail_period["Sales Amount"].sum()
+            period_days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days + 1
+            period_daily_avg = period_units / period_days if period_days > 0 else np.nan
+            period_active_days = detail_period.loc[
+                detail_period["Quantity"] != 0, "Order Date"
+            ].dt.normalize().nunique()
+            period_orders = detail_period["PO Number"].nunique() if "PO Number" in detail_period.columns else len(detail_period)
+
+            st.caption(
+                f"当前筛选区间：{pd.Timestamp(start_date).strftime('%Y-%m-%d')} "
+                f"至 {pd.Timestamp(end_date).strftime('%Y-%m-%d')}"
+            )
+            r1, r2, r3, r4, r5 = st.columns(5)
+            r1.metric("区间销量", f"{period_units:,.0f}")
+            r2.metric("区间销售额", f"${period_revenue:,.2f}")
+            r3.metric("区间日均销量", f"{period_daily_avg:,.1f}")
+            r4.metric("订单数", f"{period_orders:,.0f}")
+            r5.metric("有销量天数", f"{period_active_days:,.0f}")
+
+            st.markdown("##### 趋势参考")
             a, b, c, d, e, f = st.columns(6)
             a.metric("7D销量", f"{d_last7:,.0f}")
             b.metric("前7D销量", f"{d_prev7:,.0f}")
@@ -748,10 +772,9 @@ with tabs[2]:
             e.metric("30D销售额", f"${d_last30['Sales Amount'].sum():,.2f}")
             f.metric("30D日均", f"{d_last30['Quantity'].sum()/30:,.1f}")
 
-            p1, p2, p3 = st.columns(3)
+            p1, p2 = st.columns(2)
             p1.metric("DoD", fmt_change(d_dod))
-            p2.metric("WoW", fmt_change(d_wow))
-            p3.metric("MoM · 30D", fmt_change(d_mom))
+            p2.metric("MoM · 30D", fmt_change(d_mom))
 
             d_daily = daily_series(detail_period, start_date, end_date)
             st.subheader("日销与 7 日移动平均")
