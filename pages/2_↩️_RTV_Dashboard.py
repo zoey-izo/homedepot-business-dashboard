@@ -219,18 +219,118 @@ def read_rtv_file(path):
 
     return df
 
+
+# ----------------------------
+# RTV Alias
+# Used for products shipped as two cartons (-I / -O) but analyzed
+# as one company SKU.
+# ----------------------------
+def read_rtv_alias(path):
+    try:
+        alias = pd.read_excel(path, sheet_name="RTV Alias", dtype=str)
+    except Exception:
+        return pd.DataFrame(columns=["RTV 产品SKU", "PART#", "公司SKU"])
+
+    required = ["RTV 产品SKU", "公司SKU"]
+    if any(c not in alias.columns for c in required):
+        return pd.DataFrame(columns=["RTV 产品SKU", "PART#", "公司SKU"])
+
+    if "PART#" not in alias.columns:
+        alias["PART#"] = ""
+
+    alias = alias[["RTV 产品SKU", "PART#", "公司SKU"]].copy()
+    alias["RTV 产品SKU"] = norm_text(alias["RTV 产品SKU"])
+    alias["PART#"] = norm_text(alias["PART#"])
+    alias["公司SKU"] = alias["公司SKU"].astype("string").str.strip()
+
+    alias = alias[
+        alias["RTV 产品SKU"].notna()
+        & (alias["RTV 产品SKU"] != "")
+        & alias["公司SKU"].notna()
+        & (alias["公司SKU"] != "")
+    ].drop_duplicates(["RTV 产品SKU", "PART#"], keep="last")
+
+    return alias
+
+
+def apply_rtv_alias(rtv, alias):
+    rtv = rtv.copy()
+    rtv["原始产品SKU"] = rtv["产品SKU"]
+
+    if alias is None or alias.empty:
+        return rtv
+
+    rtv["_rtv_sku_key"] = norm_text(rtv["产品SKU"])
+    if "PART#" in rtv.columns:
+        rtv["_part_key"] = norm_text(rtv["PART#"])
+    else:
+        rtv["_part_key"] = ""
+
+    # First priority: exact Product SKU + PART# alias.
+    exact_alias = alias[alias["PART#"].notna() & (alias["PART#"] != "")].copy()
+    exact_alias = exact_alias.rename(
+        columns={
+            "RTV 产品SKU": "_rtv_sku_key",
+            "PART#": "_part_key",
+            "公司SKU": "_alias_company_sku_exact",
+        }
+    )
+    if len(exact_alias):
+        rtv = rtv.merge(
+            exact_alias[["_rtv_sku_key", "_part_key", "_alias_company_sku_exact"]],
+            on=["_rtv_sku_key", "_part_key"],
+            how="left",
+        )
+    else:
+        rtv["_alias_company_sku_exact"] = pd.NA
+
+    # Second priority: Product SKU-only alias, useful if PART# is blank.
+    sku_alias = (
+        alias.sort_values("PART#")
+        .drop_duplicates("RTV 产品SKU", keep="first")
+        .rename(
+            columns={
+                "RTV 产品SKU": "_rtv_sku_key",
+                "公司SKU": "_alias_company_sku_sku",
+            }
+        )
+    )
+    rtv = rtv.merge(
+        sku_alias[["_rtv_sku_key", "_alias_company_sku_sku"]],
+        on="_rtv_sku_key",
+        how="left",
+    )
+
+    mapped = rtv["_alias_company_sku_exact"].fillna(
+        rtv["_alias_company_sku_sku"]
+    )
+    rtv["产品SKU"] = mapped.fillna(rtv["产品SKU"])
+
+    rtv = rtv.drop(
+        columns=[
+            "_rtv_sku_key",
+            "_part_key",
+            "_alias_company_sku_exact",
+            "_alias_company_sku_sku",
+        ],
+        errors="ignore",
+    )
+    return rtv
+
+
 # ----------------------------
 # Load
 # ----------------------------
 def load_all():
     # Always read the latest GitHub data files on every rerun.
-    # This intentionally matches the Sales Dashboard behavior so RTV sales
-    # denominators cannot remain stale after orders_2026_ytd.csv or mapping
-    # is replaced in GitHub.
     orders = read_orders_file(ORDERS_FILE)
-    mapping = pd.read_excel(MAPPING_FILE, dtype=str)
+    mapping = pd.read_excel(MAPPING_FILE, sheet_name="Sheet1", dtype=str)
     sales = map_orders_to_company_sku(orders, mapping)
+
     rtv = read_rtv_file(RTV_FILE)
+    rtv_alias = read_rtv_alias(MAPPING_FILE)
+    rtv = apply_rtv_alias(rtv, rtv_alias)
+
     return sales, rtv, mapping
 
 # ----------------------------
@@ -239,7 +339,8 @@ def load_all():
 st.title("↩️ Home Depot RTV Dashboard")
 st.caption(
     "核心口径：所有退货均按 Order Date 归属月份，而不是按 RTV Date；"
-    "销售分母实时读取与 Sales Dashboard 相同的 orders_2026_ytd.csv 和 sku_mapping.xlsx。"
+    "销售分母与 Sales Dashboard 共用 orders_2026_ytd.csv；"
+    "分体空调 I/O 两箱通过 sku_mapping.xlsx 的 RTV Alias 归并到同一公司SKU。"
 )
 
 missing_files = [
@@ -572,7 +673,7 @@ with tab3:
 
         preferred_cols = [
             "RTV Date", "RTV Number", "PO#", "Order Date",
-            "PART#", "产品SKU", "产品名称", "Brand",
+            "PART#", "原始产品SKU", "产品SKU", "产品名称", "Brand",
             "Reason", "QTY", "UNIT COST", "Unit Cost",
             "Total Cost", "10%运费", "总扣款", "备注",
         ]
