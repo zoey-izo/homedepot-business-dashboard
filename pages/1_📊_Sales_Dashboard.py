@@ -121,11 +121,12 @@ def prepare(orders, mapping):
         (mapping["_key"] != "#N/A")
     ].drop_duplicates().copy()
 
+    map_extra = ["运营"] if "运营" in mapping.columns else []
     candidates = orders[["_order_row_id", "_key", "Order Date"]].merge(
         mapping[
             [
                 "_key", "Brand", "公司SKU", "产品名称", "MFG Model #", "OMSID",
-                "Valid From", "Valid To"
+                "Valid From", "Valid To", *map_extra
             ]
         ],
         on="_key",
@@ -152,7 +153,7 @@ def prepare(orders, mapping):
         chosen = valid[
             [
                 "_order_row_id", "Brand", "公司SKU", "产品名称",
-                "MFG Model #", "OMSID", "Valid From", "Valid To"
+                "MFG Model #", "OMSID", "Valid From", "Valid To", *map_extra
             ]
         ]
     else:
@@ -171,6 +172,8 @@ def prepare(orders, mapping):
     df["OMSID"] = df["OMSID"].fillna("未匹配")
     df["Brand"] = df["Brand"].fillna("未匹配")
     df["产品名称"] = df["产品名称"].fillna(df["Description"])
+    if "运营" in df.columns:
+        df["运营"] = df["运营"].fillna("未维护")
 
     return df
 
@@ -370,7 +373,7 @@ else:
         f"{pd.Timestamp(end_date).strftime('%Y-%m-%d')} · 默认建议使用 Last 30 Days 进行日常监控"
     )
 
-tabs = st.tabs(["总览", "SKU表现", "SKU详情", "数据质量"])
+tabs = st.tabs(["总览", "SKU表现", "SKU详情", "数据质量", "SKU每日运营"])
 
 with tabs[0]:
     daily = daily_series(filtered, start_date, end_date)
@@ -918,3 +921,163 @@ with tabs[3]:
             file_name="unmatched_vendor_sku.csv",
             mime="text/csv"
         )
+
+# ===== Tab 4 (index 4): SKU 每日运营（新增功能）=====
+# 运营 = 运营人员，与负责的 SKU 一一对应（来自 sku_mapping.xlsx 的「运营」列，按 MFG Model # 映射）。
+# 按对应 SKU 查看其每日销售额与每日订单数。
+# 销售额 = Unit Cost × Quantity（沿用既有规则，不改动）；订单数 = Unique PO Number。
+with tabs[4]:
+    st.subheader("📅 SKU 每日运营明细")
+    st.caption(
+        "按「运营 ↔ 负责的 SKU」对应关系查看：每个 SKU 在所选时间范围内的【每日销售额】与【每日订单数】。"
+        "销售额 = Unit Cost × Quantity；订单数 = Unique PO Number；销量 = Quantity 合计。"
+        "运营信息来自 sku_mapping.xlsx 的「运营」列（MFG Model # → 运营）。"
+    )
+
+    op_f = filtered.copy()
+    op_f["_date"] = op_f["Order Date"].dt.normalize()
+    op_days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days + 1
+
+    # 运营维度：来自 mapping 的「运营」列；缺失则退化为仅按 SKU 展示。
+    if "运营" in op_f.columns:
+        op_nonempty = op_f["运营"].replace("未维护", pd.NA).dropna().astype(str).unique()
+        if len(op_nonempty):
+            op_dim = "运营"
+            sel_ops = st.multiselect("按运营筛选（默认全部）", sorted(op_nonempty), default=sorted(op_nonempty))
+            if sel_ops:
+                op_f = op_f[op_f["运营"].isin(sel_ops)].copy()
+        else:
+            op_dim = None
+            st.warning("sku_mapping.xlsx 的「运营」列尚未填写，当前按 SKU 展示（不区分运营）。维护后覆盖上传即可。")
+    else:
+        op_dim = None
+        st.warning(
+            "sku_mapping.xlsx 缺少「运营」列。请在 Mapping 增加一列「运营」"
+            "（与 MFG Model # 对应，如：张三 / 李四），覆盖上传 data/sku_mapping.xlsx 后即可按运营查看。"
+        )
+
+    # 行标签：SKU（＋运营）
+    if op_dim:
+        op_f["_rowlabel"] = op_f[view_by].astype(str) + " ｜ " + op_f["运营"].astype(str)
+    else:
+        op_f["_rowlabel"] = op_f[view_by].astype(str)
+    op_keys = [view_by, "运营"] if op_dim else [view_by]
+
+    # ---- 1) 区间汇总（SKU × 运营）----
+    op_summary = op_f.groupby(op_keys, dropna=False).agg(
+        销售额=("Sales Amount", "sum"),
+        订单数=("PO Number", "nunique"),
+        销量=("Quantity", "sum"),
+    ).reset_index()
+    op_active = op_f.groupby(op_keys, dropna=False)["_date"].nunique().reset_index(name="有销量天数")
+    op_summary = op_summary.merge(op_active, on=op_keys, how="left")
+    op_summary["日均销售额"] = op_summary["销售额"] / op_days
+    op_summary["日均订单数"] = op_summary["订单数"] / op_days
+    op_summary = op_summary.sort_values("销售额", ascending=False).reset_index(drop=True)
+
+    oc1, oc2, oc3, oc4 = st.columns(4)
+    oc1.metric("覆盖 SKU 数", f"{op_summary[view_by].nunique():,}")
+    oc2.metric("区间总销售额", f"${op_summary['销售额'].sum():,.2f}")
+    oc3.metric("区间总订单数", f"{op_summary['订单数'].sum():,}")
+    oc4.metric("区间总销量", f"{op_summary['销量'].sum():,.0f}")
+
+    st.markdown("#### 区间汇总（按 SKU 对应运营）")
+    rename_map = {view_by: "SKU"}
+    if op_dim:
+        rename_map["运营"] = "运营"
+    show_summary = op_summary.rename(columns=rename_map)
+    sum_cols = ["SKU"] + (["运营"] if op_dim else []) + ["销售额", "订单数", "销量", "日均销售额", "日均订单数", "有销量天数"]
+    show_summary = show_summary[sum_cols]
+    st.dataframe(
+        show_summary.style.format({
+            "销售额": "${:,.2f}",
+            "订单数": "{:,.0f}",
+            "销量": "{:,.0f}",
+            "日均销售额": "${:,.2f}",
+            "日均订单数": "{:,.1f}",
+            "有销量天数": "{:,.0f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+        height=480
+    )
+
+    # ---- 2) 每日透视表（SKU ｜ 运营 × 日期）----
+    st.markdown("#### 每日透视表（SKU ｜ 运营 × 日期）")
+    op_pivot_metric = st.radio("透视指标", ["销售额", "订单数", "销量"], horizontal=True, key="op_pivot_metric")
+    op_metric_col = {"销售额": "Sales Amount", "订单数": "PO Number", "销量": "Quantity"}[op_pivot_metric]
+    op_aggfunc = "nunique" if op_pivot_metric == "订单数" else "sum"
+
+    if op_f.empty:
+        st.info("当前筛选条件下没有订单数据。")
+    else:
+        op_piv = op_f.pivot_table(
+            index="_rowlabel", columns="_date", values=op_metric_col, aggfunc=op_aggfunc, fill_value=0
+        )
+        op_piv["__total"] = op_piv.sum(axis=1)
+        op_piv = op_piv.sort_values("__total", ascending=False).drop(columns="__total")
+        op_top_n = st.slider("显示 Top N SKU", 5, min(60, len(op_piv)), 20, key="op_topn")
+        op_piv = op_piv.head(op_top_n)
+        op_piv.columns = [d.strftime("%m-%d") for d in op_piv.columns]
+        op_piv.loc["合计"] = op_piv.sum(axis=0)
+        op_fmt = (lambda x: f"${x:,.0f}") if op_pivot_metric == "销售额" else (lambda x: f"{x:,.0f}")
+        st.caption("行 = SKU ｜ 运营，列 = 日期(MM-DD)，最后一行为合计；可横向对比每个 SKU 的每日表现。")
+        st.dataframe(
+            op_piv.style.format(op_fmt),
+            use_container_width=True,
+            hide_index=False,
+            height=520
+        )
+
+    # ---- 3) 单 SKU 每日下钻 ----
+    st.markdown("#### 单 SKU 每日下钻")
+    op_choices = sorted(op_f["_rowlabel"].dropna().astype(str).unique())
+    if op_choices:
+        op_selected = st.selectbox("选择 SKU（含运营）下钻", op_choices, key="op_drill")
+        if op_dim:
+            _sku, _op = op_selected.rsplit(" ｜ ", 1)
+            op_drill_df = op_f[(op_f[view_by].astype(str) == _sku) & (op_f["运营"].astype(str) == _op)].copy()
+        else:
+            _sku = op_selected
+            op_drill_df = op_f[op_f[view_by].astype(str) == _sku].copy()
+        op_daily = op_drill_df.groupby("_date").agg(
+            销售额=("Sales Amount", "sum"),
+            订单数=("PO Number", "nunique"),
+            销量=("Quantity", "sum"),
+        ).reset_index().sort_values("_date")
+        op_daily["销售额DoD%"] = op_daily["销售额"].pct_change() * 100
+        op_daily["订单数DoD%"] = op_daily["订单数"].pct_change() * 100
+        op_daily["_date_str"] = op_daily["_date"].dt.strftime("%Y-%m-%d")
+
+        od1, od2, od3 = st.columns(3)
+        od1.metric("区间销售额", f"${op_daily['销售额'].sum():,.2f}")
+        od2.metric("区间订单数", f"{op_daily['订单数'].sum():,.0f}")
+        od3.metric("有销量天数", f"{len(op_daily):,.0f}")
+
+        st.line_chart(op_daily.set_index("_date_str")[["销售额"]], use_container_width=True)
+        st.line_chart(op_daily.set_index("_date_str")[["订单数"]], use_container_width=True)
+
+        op_show = op_daily[["_date_str", "销售额", "订单数", "销量", "销售额DoD%", "订单数DoD%"]].rename(
+            columns={
+                "_date_str": "日期",
+                "销售额": "当日销售额",
+                "订单数": "当日订单数",
+                "销量": "当日销量",
+                "销售额DoD%": "销售额DoD%",
+                "订单数DoD%": "订单数DoD%",
+            }
+        )
+        st.dataframe(
+            op_show.style.format({
+                "当日销售额": "${:,.2f}",
+                "当日订单数": "{:,.0f}",
+                "当日销量": "{:,.0f}",
+                "销售额DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+                "订单数DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            height=420
+        )
+    else:
+        st.info("当前筛选条件下没有可下钻的 SKU。")
