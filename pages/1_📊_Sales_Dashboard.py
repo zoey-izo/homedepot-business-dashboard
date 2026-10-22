@@ -934,6 +934,30 @@ with tabs[4]:
         "运营信息来自 sku_mapping.xlsx 的「运营」列（MFG Model # → 运营）。"
     )
 
+    def _style_pct(v):
+        # 涨 = 红，跌 = 绿（A股惯例）
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        try:
+            vv = float(v)
+        except Exception:
+            return ""
+        if vv > 0:
+            return "color:#d62728;font-weight:bold"
+        if vv < 0:
+            return "color:#2ca02c;font-weight:bold"
+        return "color:#888888"
+
+    def _style_trend(v):
+        if v is None:
+            return ""
+        s = str(v)
+        if s.startswith("▲"):
+            return "color:#d62728;font-weight:bold"
+        if s.startswith("▼"):
+            return "color:#2ca02c;font-weight:bold"
+        return "color:#888888"
+
     op_f = filtered.copy()
     op_f["_date"] = op_f["Order Date"].dt.normalize()
     op_days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days + 1
@@ -1029,6 +1053,66 @@ with tabs[4]:
             height=520
         )
 
+    # ---- 2.5) SKU 销量日环比（最新日 vs 前一日）----
+    st.markdown("#### SKU 销量日环比（最新日 vs 前一日）")
+    st.caption(
+        "按「运营 ↔ SKU」查看每个 SKU 最新有销量日相对前一日（最近一个有销量日）的【销量】增减。"
+        "▲ 增长（红）／ ▼ 下降（绿）；仅一日数据标记 —。已套用上方「按运营筛选」。销量 = Quantity 合计。"
+    )
+    if op_f.empty or op_f["_date"].nunique() < 2:
+        st.info("当前筛选条件下数据不足以计算日环比（至少需要两个有销量日）。")
+    else:
+        mom_keys = op_keys  # [view_by] 或 [view_by, "运营"]
+        daily_qty = (
+            op_f.groupby(mom_keys + ["_date"], dropna=False)["Quantity"]
+            .sum().reset_index()
+        )
+        mom_rows = []
+        for keys_vals, g in daily_qty.groupby(mom_keys, dropna=False):
+            if not isinstance(keys_vals, tuple):
+                keys_vals = (keys_vals,)
+            base = dict(zip(mom_keys, keys_vals))
+            g = g.sort_values("_date")
+            latest = g.iloc[-1]
+            if len(g) < 2:
+                mom_rows.append({**base, "最新日期": latest["_date"], "最新日销量": latest["Quantity"],
+                                 "前一日销量": pd.NA, "变化量": pd.NA, "环比%": pd.NA})
+                continue
+            prev = g.iloc[-2]
+            change = latest["Quantity"] - prev["Quantity"]
+            pct = (change / prev["Quantity"] * 100) if prev["Quantity"] else pd.NA
+            mom_rows.append({**base, "最新日期": latest["_date"], "最新日销量": latest["Quantity"],
+                             "前一日销量": prev["Quantity"], "变化量": change, "环比%": pct})
+        op_mom = pd.DataFrame(mom_rows)
+        op_mom["趋势"] = op_mom["环比%"].apply(
+            lambda p: "—" if pd.isna(p) else ("▲ 增长" if p > 0 else ("▼ 下降" if p < 0 else "— 持平"))
+        )
+        # 区间累计销量（来自区间汇总）
+        op_mom = op_mom.merge(op_summary[op_keys + ["销量"]], on=op_keys, how="left").rename(
+            columns={"销量": "区间累计销量"}
+        )
+        op_mom["最新日期"] = op_mom["最新日期"].dt.strftime("%Y-%m-%d")
+        op_mom = op_mom.sort_values("环比%", ascending=False, na_position="last").reset_index(drop=True)
+
+        op_mom_n = st.slider("日环比榜显示条数", 5, max(5, min(80, len(op_mom))), min(30, len(op_mom)), key="op_mom_n")
+        op_mom_show = op_mom.head(op_mom_n)
+
+        disp_cols = [view_by] + (["运营"] if op_dim else []) + \
+                    ["最新日期", "最新日销量", "前一日销量", "变化量", "环比%", "趋势", "区间累计销量"]
+        op_mom_show = op_mom_show.rename(columns={view_by: "SKU"})[disp_cols]
+        st.dataframe(
+            op_mom_show.style.format({
+                "最新日销量": "{:,.0f}",
+                "前一日销量": lambda x: "—" if pd.isna(x) else f"{x:,.0f}",
+                "变化量": lambda x: "—" if pd.isna(x) else f"{x:+,.0f}",
+                "环比%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+                "区间累计销量": "{:,.0f}",
+            }).applymap(_style_pct, subset=["环比%"]).applymap(_style_trend, subset=["趋势"]),
+            use_container_width=True,
+            hide_index=True,
+            height=480
+        )
+
     # ---- 3) 单 SKU 每日下钻 ----
     st.markdown("#### 单 SKU 每日下钻")
     op_choices = sorted(op_f["_rowlabel"].dropna().astype(str).unique())
@@ -1047,6 +1131,7 @@ with tabs[4]:
         ).reset_index().sort_values("_date")
         op_daily["销售额DoD%"] = op_daily["销售额"].pct_change() * 100
         op_daily["订单数DoD%"] = op_daily["订单数"].pct_change() * 100
+        op_daily["销量DoD%"] = op_daily["销量"].pct_change() * 100
         op_daily["_date_str"] = op_daily["_date"].dt.strftime("%Y-%m-%d")
 
         od1, od2, od3 = st.columns(3)
@@ -1057,7 +1142,7 @@ with tabs[4]:
         st.line_chart(op_daily.set_index("_date_str")[["销售额"]], use_container_width=True)
         st.line_chart(op_daily.set_index("_date_str")[["订单数"]], use_container_width=True)
 
-        op_show = op_daily[["_date_str", "销售额", "订单数", "销量", "销售额DoD%", "订单数DoD%"]].rename(
+        op_show = op_daily[["_date_str", "销售额", "订单数", "销量", "销售额DoD%", "订单数DoD%", "销量DoD%"]].rename(
             columns={
                 "_date_str": "日期",
                 "销售额": "当日销售额",
@@ -1065,16 +1150,19 @@ with tabs[4]:
                 "销量": "当日销量",
                 "销售额DoD%": "销售额DoD%",
                 "订单数DoD%": "订单数DoD%",
+                "销量DoD%": "销量DoD%",
             }
         )
+        op_show = op_show.style.format({
+            "当日销售额": "${:,.2f}",
+            "当日订单数": "{:,.0f}",
+            "当日销量": "{:,.0f}",
+            "销售额DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+            "订单数DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+            "销量DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+        }).applymap(_style_pct, subset=["销售额DoD%", "订单数DoD%", "销量DoD%"])
         st.dataframe(
-            op_show.style.format({
-                "当日销售额": "${:,.2f}",
-                "当日订单数": "{:,.0f}",
-                "当日销量": "{:,.0f}",
-                "销售额DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
-                "订单数DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
-            }),
+            op_show,
             use_container_width=True,
             hide_index=True,
             height=420
