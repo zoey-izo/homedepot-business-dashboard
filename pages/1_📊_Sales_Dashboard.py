@@ -1103,7 +1103,7 @@ with tabs[4]:
         op_mom_n = st.slider("日环比榜显示条数", 5, max(5, min(80, len(op_mom))), min(30, len(op_mom)), key="op_mom_n")
         op_mom_show = op_mom.head(op_mom_n)
 
-        disp_cols = [view_by] + (["运营"] if op_dim else []) + \
+        disp_cols = ["SKU"] + (["运营"] if op_dim else []) + \
                     ["最新日期", "最新日销量", "前一日销量", "变化量", "环比%", "趋势", "区间累计销量"]
         op_mom_show = op_mom_show.rename(columns={view_by: "SKU"})[disp_cols]
         st.dataframe(
