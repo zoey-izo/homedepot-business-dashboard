@@ -948,6 +948,12 @@ with tabs[4]:
             return "color:#2ca02c;font-weight:bold"
         return "color:#888888"
 
+    def _style_apply(styler, func, subset=None):
+        """pandas>=2.1 用 Styler.map；旧版回退 applymap（pandas 3.0 已移除 applymap）。"""
+        if hasattr(styler, "map"):
+            return styler.map(func, subset=subset)
+        return styler.applymap(func, subset=subset)
+
     def _style_trend(v):
         if v is None:
             return ""
@@ -1101,13 +1107,21 @@ with tabs[4]:
                     ["最新日期", "最新日销量", "前一日销量", "变化量", "环比%", "趋势", "区间累计销量"]
         op_mom_show = op_mom_show.rename(columns={view_by: "SKU"})[disp_cols]
         st.dataframe(
-            op_mom_show.style.format({
-                "最新日销量": "{:,.0f}",
-                "前一日销量": lambda x: "—" if pd.isna(x) else f"{x:,.0f}",
-                "变化量": lambda x: "—" if pd.isna(x) else f"{x:+,.0f}",
-                "环比%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
-                "区间累计销量": "{:,.0f}",
-            }).applymap(_style_pct, subset=["环比%"]).applymap(_style_trend, subset=["趋势"]),
+            _style_apply(
+                _style_apply(
+                    op_mom_show.style.format({
+                        "最新日销量": "{:,.0f}",
+                        "前一日销量": lambda x: "—" if pd.isna(x) else f"{x:,.0f}",
+                        "变化量": lambda x: "—" if pd.isna(x) else f"{x:+,.0f}",
+                        "环比%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+                        "区间累计销量": "{:,.0f}",
+                    }),
+                    _style_pct,
+                    subset=["环比%"],
+                ),
+                _style_trend,
+                subset=["趋势"],
+            ),
             use_container_width=True,
             hide_index=True,
             height=480
@@ -1153,14 +1167,18 @@ with tabs[4]:
                 "销量DoD%": "销量DoD%",
             }
         )
-        op_show = op_show.style.format({
-            "当日销售额": "${:,.2f}",
-            "当日订单数": "{:,.0f}",
-            "当日销量": "{:,.0f}",
-            "销售额DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
-            "订单数DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
-            "销量DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
-        }).applymap(_style_pct, subset=["销售额DoD%", "订单数DoD%", "销量DoD%"])
+        op_show = _style_apply(
+            op_show.style.format({
+                "当日销售额": "${:,.2f}",
+                "当日订单数": "{:,.0f}",
+                "当日销量": "{:,.0f}",
+                "销售额DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+                "订单数DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+                "销量DoD%": lambda x: "—" if pd.isna(x) else f"{x:+.1f}%",
+            }),
+            _style_pct,
+            subset=["销售额DoD%", "订单数DoD%", "销量DoD%"],
+        )
         st.dataframe(
             op_show,
             use_container_width=True,
