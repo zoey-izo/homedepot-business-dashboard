@@ -993,6 +993,30 @@ with tabs[4]:
         op_f["_rowlabel"] = op_f[view_by].astype(str)
     op_keys = [view_by, "运营"] if op_dim else [view_by]
 
+    # ---- 0) 上月（前一周期）窗口：用于「月度销量对比」----
+    _sd = pd.Timestamp(start_date)
+    _ed = pd.Timestamp(end_date)
+    _cur_first = pd.Timestamp(_sd.year, _sd.month, 1)
+    _cur_last = pd.Timestamp(_sd.year, _sd.month, 1) + pd.Timedelta(days=32)
+    _cur_last = pd.Timestamp(_cur_last.year, _cur_last.month, 1) - pd.Timedelta(days=1)
+    _is_full_month = (_sd.normalize() == _cur_first) and (_ed.normalize() == _cur_last)
+    if _is_full_month:
+        # 选中整月 → 直接取上一个自然月（如 10 月 → 9 月）
+        _pl = _cur_first - pd.Timedelta(days=1)  # 上月最后一天
+        prior_start = pd.Timestamp(_pl.year, _pl.month, 1)
+        prior_end = pd.Timestamp(_pl.year, _pl.month, _pl.day)
+        _prior_label = f"上月（{prior_start.strftime('%Y-%m')}）"
+    else:
+        # 任意区间 → 前移一个相同长度的周期
+        _span = (_ed - _sd).days + 1
+        prior_end = _sd - pd.Timedelta(days=1)
+        prior_start = prior_end - pd.Timedelta(days=_span - 1)
+        _prior_label = f"上期（前移一个周期 {prior_start.strftime('%Y-%m-%d')}~{prior_end.strftime('%Y-%m-%d')}）"
+    prior_df = df[(df["Order Date"] >= prior_start) & (df["Order Date"] <= prior_end)].copy()
+    _prior_ops = sel_ops if op_dim else None
+    if _prior_ops:
+        prior_df = prior_df[prior_df["运营"].isin(_prior_ops)].copy()
+
     # ---- 1) 区间汇总（SKU × 运营）----
     op_summary = op_f.groupby(op_keys, dropna=False).agg(
         销售额=("Sales Amount", "sum"),
@@ -1152,6 +1176,18 @@ with tabs[4]:
         od1.metric("区间销售额", f"${op_daily['销售额'].sum():,.2f}")
         od2.metric("区间订单数", f"{op_daily['订单数'].sum():,.0f}")
         od3.metric("有销量天数", f"{len(op_daily):,.0f}")
+
+        # 单 SKU 月度对比：本期 vs 上月（前一周期）同种 SKU 销量
+        _p = prior_df[prior_df[view_by].astype(str) == _sku]
+        _p_qty = _p["Quantity"].sum()
+        _p_amt = _p["Sales Amount"].sum()
+        _cur_qty = op_drill_df["Quantity"].sum()
+        _mom_pct = (op_drill_df["Quantity"].sum() - _p_qty) / _p_qty * 100 if _p_qty else pd.NA
+        od4, od5, od6 = st.columns(3)
+        od4.metric(f"上月销量（{_prior_label}）", f"{_p_qty:,.0f}")
+        od5.metric(f"上月销售额", f"${_p_amt:,.2f}")
+        od6.metric("销量环比(本期/上月)",
+                   "—" if pd.isna(_mom_pct) else f"{_mom_pct:+.1f}%")
 
         st.line_chart(op_daily.set_index("_date_str")[["销售额"]], use_container_width=True)
         st.line_chart(op_daily.set_index("_date_str")[["订单数"]], use_container_width=True)
